@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Getting Started with Microsoft identity</title>
+
+    <!-- IEでもPromise(非同期処理の操作の完了時に結果を返す)を利用可能とするようにbluebirdライブラリを利用する -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bluebird/3.7.2/bluebird.min.js"></script>
+
+    <!-- Microsoft Authentication Library for Javascript(MSAL.js)を利用する-->
+    <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.js"></script>
+
+</head>
+
+<body>
+    <div class="container">
+        <div>
+            <!-- ウエルカムメッセージ。ユーザーサインイン後にダイナミックに書き換える-->
+            <p id="WelcomeMessage">Microsoft Authentication Library For Javascript (MSAL.js) Exercise</p>
+
+            <!-- サインインボタンの用意-->
+            <button id="SignIn" onclick="signIn()">Sign In</button>
+        </div>
+        <h2>Latest messages</h2>
+        <!-- 最新10件のメールメッセージを表示する-->
+        <div id="messages"></div>
+    </div>
+    <script>
+        // どのブラウザーを使っているかをチェック
+        var ua = window.navigator.userAgent;
+        var msie = ua.indexOf('MSIE ');
+        var msie11 = ua.indexOf('Trident/');
+        var msedge = ua.indexOf('Edge/');
+        var isIE = msie > 0 || msie11 > 0;
+        var isEdge = msedge > 0;
+
+        // IEはPOPUPをサポートしていないのでリダイレクトを使う。それ以外のモダンブラウザではPOPUPを使う。
+        // POPUPが推奨。
+        var loginType = isIE ? "REDIRECT" : "POPUP";
+
+        // MSAL用の構成。これをもとにmsalApplicationオブジェクトを作成する。
+        var msalConfig = {
+            auth: {
+                clientId: '{{アプリケーション(クライアント)ID}}',
+                authority: 'https://login.microsoftonline.com/{{オブジェクトID}}',
+                redirectURI: '{{リダイレクトURI}}}' // Azure ADで設定したリダイレクトURIと一致している必要あり
+            },
+            cache: {
+                cacheLocation: "localStorage",
+                storeAuthStateInCookie: isIE || isEdge
+            }
+        };
+
+        // Microsoft Graph用の構成
+        var graphConfig = {
+            //自分自身のアイテムを参照する
+            graphMeEndpoint: "https://graph.microsoft.com/v1.0/me",
+
+            // スコープとして、ユーザー情報の参照と、メール情報の参照を設定
+            requestObj: {
+                scopes: ["user.read", "mail.read"]
+            }
+        };
+
+        // MSAL用の構成を用いて msalApplication オブジェクトの生成
+        var msalApplication = new msal.PublicClientApplication(msalConfig);
+        var userName = "";
+
+        // 現在のページがユーザーが直接アクセスしたものなのか、Azure ADによってリダイレクトされたものなのかを確認して処理
+        msalApplication.handleRedirectPromise()
+            .then(handleResponse)
+            .catch(function (error) { console.log(error); }
+            );
+
+        // ウェルカムメッセージの構成。認証後にユーザー名を表示し、サインインではなく、サインアウトボタンを表示する。
+        function updateUserInterface() {
+            var divWelcome = document.getElementById('WelcomeMessage');
+            divWelcome.innerHTML = 'Welcome <strong>' + userName + '</strong> to Microsoft Graph API';
+
+            var loginbutton = document.getElementById('SignIn');
+            loginbutton.innerHTML = 'Sign Out';
+            loginbutton.setAttribute('onclick', 'signOut();');
+        }
+
+        // アクセストークンを取得し、ユーザーのメールアイテムを取得する
+        function acquireTokenAndGetUserEmails() {
+            // Microsoft Graph用の構成を用いて現在のユーザーを対象に要求する
+            var request = graphConfig.requestObj;
+            request.account = msalApplication.getAccountByUsername(userName);
+
+            // まず、アクセストークンの取得を試みる。認証が必要であれば認証させる。
+            msalApplication.acquireTokenSilent(request)
+                .then(function (tokenResponse) {
+                    // アクセストークンを用いてMicrosoft Graphからメッセージを取得する
+                    // 成功時には graphAPICallback関数を呼ぶようにする
+                    getMessagesFromMSGraph(tokenResponse.accessToken, graphAPICallback);
+                })
+                .catch(function (error) {
+                    console.log("silent token acquisition fails.");
+                    if (error instanceof msal.InteractionRequiredAuthError) {
+                        if (loginType == "POPUP") {
+                            // IE以外ではポップアップを利用する
+                            msalApplication.acquireTokenPopup(request)
+                                .then(function (tokenResponse) {
+                                    // アクセストークンを用いてMicrosoft Graphからメッセージを取得する
+                                    // 成功時には graphAPICallback関数を呼ぶようにする
+                                    getMessagesFromMSGraph(tokenResponse.accessToken, graphAPICallback);
+                                })
+                                .catch(function (error) { console.error(error); }
+                                );
+                        } else {
+                            // IEではリダイレクトを利用する
+                            msalApplication.acquireTokenRedirect(request);
+                        }
+                    } else {
+                        console.error(error);
+                    }
+                });
+        }
+
+        // MSGraphからメッセージを取得する
+        function getMessagesFromMSGraph(accessToken, callback) {
+            // 10件のメールメッセージの件名のみを取得
+            var endpoint = graphConfig.graphMeEndpoint + "/messages?$top=10&$select=subject";
+
+            var xmlHttp = new XMLHttpRequest();
+            xmlHttp.onreadystatechange = function () {
+                if (this.readyState == 4 && this.status == 200)
+                    //コールバック関数にレスポンスをJSONで渡す
+                    callback(JSON.parse(this.responseText));
+            }
+            xmlHttp.open("GET", endpoint, true);
+            xmlHttp.setRequestHeader('Authorization', 'Bearer ' + accessToken);
+            xmlHttp.send();
+        }
+
+        // コールバック関数
+        // メッセージを表示する
+        function graphAPICallback(data) {
+            var htmlBody = '';
+            data.value.forEach(message => {
+                htmlBody += `<li>${message.subject}</li>`;
+            });
+            document.getElementById("messages").innerHTML = `<ul>${htmlBody}</ul>`;
+        }
+
+        // サインインボタンが押された時の処理
+        function signIn() {
+            if (loginType == "POPUP") {
+                // IE以外
+                msalApplication.loginPopup(graphConfig.requestObj)
+                    .then(handleResponse)
+                    .catch(function (error) { console.log(error); }
+                    );
+            } else {
+                // IEの場合にはリダイレクト
+                msalApplication.loginRedirect(graphConfig.requestObj);
+            }
+        }
+
+        // レスポンスの処理
+        function handleResponse(loginResponse) {
+            if (loginResponse != null) {
+                userName = loginResponse.account.username;
+            } else {
+                var currentAccounts = msalApplication.getAllAccounts();
+                if (currentAccounts == null || currentAccounts.length == 0) {
+                    return;
+                } else {
+                    userName = currentAccounts[0].username;
+                }
+            }
+
+            updateUserInterface();
+            acquireTokenAndGetUserEmails();
+        }
+
+        // サインアウト
+        function signOut() {
+            var logoutRequest = {
+                account: msalApplication.getAccountByUsername(userName)
+            };
+
+            msalApplication.logout(logoutRequest);
+        }
+    </script>
+</body>
+
+</html>
